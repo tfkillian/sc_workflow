@@ -1,0 +1,212 @@
+---
+title: "scRNA-seq Analysis with Seurat"
+author: "Theo Killian"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r, echo = FALSE, results = 'asis'}
+suppressPackageStartupMessages(library("dplyr"))
+knitr::opts_chunk$set(collapse=TRUE, comment="#>", warning=FALSE, message=FALSE)
+```
+
+# Introduction
+
+This document demonstrates how to load and preprocess single-cell RNA-seq data
+generated via 10x Genomics (and processed by Cell Ranger) using the Seurat R package. We will:
+
+1) Read the filtered feature-barcode matrix (barcodes.tsv.gz, features.tsv.gz, and matrix.mtx.gz) into R.
+1) Create a Seurat object.
+1) Perform preliminary QC and filtering (removing low-quality cells and potential artifacts).
+1) Run dimensionality reduction (PCA, UMAP), clustering, and visualize the results.
+
+```{r load_libraries, warning=FALSE, message=FALSE}
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(stringr)
+library(readxl)
+library(writexl)
+library(Seurat)       # For single-cell data analysis
+library(ggplot2)      # Visualization
+library(patchwork)    # Combine multiple ggplot2 plots
+```
+
+## Load 10x Genomics Data
+
+Below, we assume that your filtered matrix files are in a directory like:
+
+```{bash}
+results/cellranger_count/SAMPLE_1/outs/filtered_feature_bc_matrix/
+```
+
+Adjust this path for your dataset as needed.
+
+```{r warning=FALSE, message=FALSE}
+# Replace "SAMPLE_1" with your actual sample directory
+data_dir <- "results/cellranger_count/SAMPLE_1/outs/filtered_feature_bc_matrix/"
+
+# Read10X() automatically looks for barcodes.tsv.gz, features.tsv.gz, matrix.mtx.gz
+# in the provided directory
+sc_data <- Read10X(data.dir = data_dir)
+
+# Create a Seurat object
+# min.cells = 3 means a gene is retained if detected in at least 3 cells
+# min.features = 200 means a cell is retained if it has at least 200 genes detected
+seurat_obj <- CreateSeuratObject(
+  counts = sc_data,
+  project = "MyProject",
+  min.cells = 3,
+  min.features = 200
+)
+
+# Basic exploration
+seurat_obj
+```
+
+## Quality Control (QC)
+
+Cells with low unique feature counts or high mitochondrial gene percentages are
+often considered low-quality or dying cells. We can identify them by calculating
+the percentage of reads mapped to mitochondrial genes and then filtering.
+
+```{r warning=FALSE, message=FALSE}
+# Calculate percent of transcripts mapping to mitochondrial genes
+# Note: Human mitochondrial genes often start with "MT-"; adjust for other species
+seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, pattern = "^MT-")
+
+# Visualize QC metrics
+VlnPlot(seurat_obj, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+# Scatter plot to explore relationships between metrics
+FeatureScatter(seurat_obj, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+  FeatureScatter(seurat_obj, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+# Basic filtering thresholds:
+# - Keep cells with 200 < nFeature_RNA < 2500
+# - Keep cells with < 5% mitochondria
+seurat_obj_filtered <- subset(
+  seurat_obj,
+  subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5
+)
+
+# Check the updated object
+seurat_obj_filtered
+```
+
+## Normalize Data and Identify Variable Features
+
+Next, we normalize the data to account for differences in library size, then identify the most variable genes.
+
+```{r warning=FALSE, message=FALSE}
+# Log-normalize the data
+seurat_obj_filtered <- NormalizeData(seurat_obj_filtered)
+
+# Find the most variable features
+seurat_obj_filtered <- FindVariableFeatures(
+  seurat_obj_filtered,
+  selection.method = "vst",
+  nfeatures = 2000
+)
+
+# Inspect the top 10 most variable genes
+top10 <- head(VariableFeatures(seurat_obj_filtered), 10)
+top10
+```
+
+We can also visualize the variable features:
+
+```{r fig.width=10, warning=FALSE, message=FALSE}
+plot1 <- VariableFeaturePlot(seurat_obj_filtered)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+```
+
+## Scaling and Linear Dimensional Reduction (PCA)
+
+```{r fig.width=10, warning=FALSE, message=FALSE}
+# Scale the data
+seurat_obj_filtered <- ScaleData(seurat_obj_filtered)
+
+# Run PCA
+seurat_obj_filtered <- RunPCA(seurat_obj_filtered, features = VariableFeatures(seurat_obj_filtered))
+
+# Visualize the PCA
+DimPlot(seurat_obj_filtered, reduction = "pca")
+
+# Examine PCA results
+ElbowPlot(seurat_obj_filtered)
+```
+
+The ElbowPlot helps decide how many principal components (PCs) to use for downstream clustering.
+
+## Clustering and UMAP
+
+We typically choose a range of PCs (e.g., 1:10 or 1:15) to capture the major
+sources of variation. Then we run clustering and UMAP:
+
+```{r warning=FALSE, message=FALSE}
+# Find neighbors using the first 10 PCs (adjust as needed)
+seurat_obj_filtered <- FindNeighbors(seurat_obj_filtered, dims = 1:10)
+
+# Find clusters at a chosen resolution (adjust resolution as needed for your dataset)
+seurat_obj_filtered <- FindClusters(seurat_obj_filtered, resolution = 0.5)
+
+# Run UMAP
+seurat_obj_filtered <- RunUMAP(seurat_obj_filtered, dims = 1:10)
+
+# UMAP visualization
+DimPlot(seurat_obj_filtered, reduction = "umap", label = TRUE, pt.size = 0.6) +
+  ggtitle("UMAP Clusters") + theme_minimal()
+```
+
+## Marker Gene Identification (Optional)
+
+To identify marker genes for each cluster, run FindAllMarkers or FindMarkers for
+specific clusters. This step can be computationally intensive:
+
+```{r warning=FALSE, message=FALSE}
+cluster_markers <- FindAllMarkers(
+  seurat_obj_filtered, 
+  only.pos = TRUE,
+  min.pct = 0.25,
+  logfc.threshold = 0.25
+)
+head(cluster_markers)
+```
+
+## Summary and Next Steps
+
+We have now:
+
+1) Loaded single-cell RNA-seq data from the Cell Ranger output directory.
+1) Created a Seurat object and performed QC.
+1) Filtered out low-quality cells.
+1) Normalized data and identified highly variable genes.
+1)Scaled data, ran PCA, performed clustering, and visualized via UMAP.
+
+Next steps could include:
+
+1) Annotating clusters by comparing with known marker genes.
+1) Exploring sub-clusters or running trajectory analysis (if applicable).
+1) Integrating multiple samples or time points (using Seurat’s integration workflows).
+1) Further QC (e.g., doublet detection) if needed.
+
+## Save results
+
+The results are saved as an RDS object.
+
+```{r warning=FALSE, message=FALSE}
+saveRDS(object = seurat_obj_filtered, file = paste0(
+  "path/to/file/seurat_obj_filtered_", Sys.Date(), ".rds"))
+```
+
+*Session Info*
+
+```{r sessionInfo}
+sessionInfo()
+```

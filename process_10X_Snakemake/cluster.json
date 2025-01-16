@@ -1,0 +1,22 @@
+{
+  "cellranger_count": {
+    "cores": 8,
+    "mem": "32G",
+    "time": "12:00:00"
+  },
+  "fastqc": {
+    "cores": 2,
+    "mem": "4G",
+    "time": "01:00:00"
+  },
+  "scrublet_qc": {
+    "cores": 4,
+    "mem": "8G",
+    "time": "02:00:00"
+  },
+  "default": {
+    "cores": 1,
+    "mem": "2G",
+    "time": "00:30:00"
+  }
+}

@@ -1,0 +1,148 @@
+###############################################################################
+# Load configuration
+###############################################################################
+import os
+configfile: "config.yaml"
+SAMPLES = config["samples"]
+CELLRANGER_REF = config["cellranger_ref"]
+
+# You can define default resource values here or in your cluster configuration.
+DEFAULT_THREADS = 8
+
+###############################################################################
+# Global settings and helper functions
+###############################################################################
+threads: DEFAULT_THREADS
+
+# A helper function to get FASTQ files for a given sample
+def get_fastqs(wildcards):
+    sample_dir = os.path.join("data", wildcards.sample)
+    return sorted([os.path.join(sample_dir, f) for f in os.listdir(sample_dir) if f.endswith(".fastq.gz")])
+
+###############################################################################
+# Final targets:
+# For each sample we want:
+#   - Filtered feature barcode matrices (barcodes.tsv.gz, features.tsv.gz, matrix.mtx.gz)
+#   - Scrublet doublet QC reports / filtered barcodes in results/scrublet/{sample}
+# Plus a consolidated MultiQC report.
+###############################################################################
+rule all:
+    input:
+        # Cell Ranger outputs:
+        expand("results/cellranger_count/{sample}/outs/filtered_feature_bc_matrix/barcodes.tsv.gz",
+               sample=SAMPLES),
+        expand("results/cellranger_count/{sample}/outs/filtered_feature_bc_matrix/features.tsv.gz",
+               sample=SAMPLES),
+        expand("results/cellranger_count/{sample}/outs/filtered_feature_bc_matrix/matrix.mtx.gz",
+               sample=SAMPLES),
+        # Scrublet QC outputs:
+        expand("results/scrublet/{sample}/scrublet_report.html", sample=SAMPLES),
+        # Consolidated MultiQC:
+        "results/multiqc/multiqc_report.html"
+
+###############################################################################
+# FastQC for each sample FASTQ
+###############################################################################
+rule fastqc:
+    input:
+        lambda wildcards: get_fastqs(wildcards)
+    output:
+        # Create lists for HTML and ZIP outputs dynamically:
+        html=expand("results/fastqc/{sample}/{fastq_basename}_fastqc.html",
+                    sample="{sample}",
+                    fastq_basename=lambda wc: [os.path.splitext(os.path.splitext(f)[0])[0]
+                                               for f in os.listdir(f"data/{wc.sample}")
+                                               if f.endswith(".fastq.gz")]),
+        zip=expand("results/fastqc/{sample}/{fastq_basename}_fastqc.zip",
+                   sample="{sample}",
+                   fastq_basename=lambda wc: [os.path.splitext(os.path.splitext(f)[0])[0]
+                                               for f in os.listdir(f"data/{wc.sample}")
+                                               if f.endswith(".fastq.gz")])
+    params:
+        outdir = "results/fastqc/{sample}"
+    threads: config["resources"].get("fastqc", 2)
+    shell:
+        """
+        mkdir -p {params.outdir}
+        fastqc --threads {threads} --outdir {params.outdir} {input}
+        """
+
+###############################################################################
+# MultiQC to aggregate FastQC reports
+###############################################################################
+rule multiqc:
+    input:
+        expand("results/fastqc/{sample}/{fastq_basename}_fastqc.html",
+               sample=SAMPLES,
+               fastq_basename=lambda wc: [
+                   os.path.splitext(os.path.splitext(f)[0])
+                   [0] for sample in SAMPLES for f in os.listdir(os.path.join("data", sample)) if f.endswith(".fastq.gz")
+               ]
+        )
+    output:
+        "results/multiqc/multiqc_report.html"
+    params:
+        outdir = "results/multiqc"
+    shell:
+        """
+        mkdir -p {params.outdir}
+        multiqc results/fastqc -o {params.outdir}
+        """
+
+###############################################################################
+# Cell Ranger count
+###############################################################################
+rule cellranger_count:
+    input:
+        fastqs=lambda wildcards: get_fastqs(wildcards)
+    output:
+        # Track the key output files from Cell Ranger
+        "results/cellranger_count/{sample}/outs/filtered_feature_bc_matrix/barcodes.tsv.gz",
+        "results/cellranger_count/{sample}/outs/filtered_feature_bc_matrix/features.tsv.gz",
+        "results/cellranger_count/{sample}/outs/filtered_feature_bc_matrix/matrix.mtx.gz"
+    params:
+        sample_id=lambda wildcards: wildcards.sample,
+        outdir="results/cellranger_count/{sample}"
+    threads: config["resources"].get("cellranger", 8)
+    shell:
+        """
+        # Run cellranger count; adjust the command and options as needed.
+        cellranger count \
+            --id={params.sample_id} \
+            --transcriptome={CELLRANGER_REF} \
+            --fastqs=data/{params.sample_id} \
+            --sample={params.sample_id} \
+            --localcores={threads}
+        
+        # Move the generated folder into the designated results directory.
+        mv {params.sample_id} {params.outdir}
+        """
+
+###############################################################################
+# Scrublet Doublet Detection / Additional QC
+###############################################################################
+rule scrublet_qc:
+    input:
+        matrix_dir="results/cellranger_count/{sample}/outs/filtered_feature_bc_matrix"
+    output:
+        report="results/scrublet/{sample}/scrublet_report.html",
+        filtered_barcodes="results/scrublet/{sample}/filtered_barcodes.txt"
+    params:
+        outdir="results/scrublet/{sample}"
+    threads: config["resources"].get("scrublet", 4)
+    shell:
+        """
+        mkdir -p {params.outdir}
+        # Call a custom python script that wraps scrublet.
+        # The script should accept:
+        #   - A path to the filtered feature matrix folder (with barcodes.tsv.gz, etc.)
+        #   - An output directory for QC reports and filtered barcodes
+        python scripts/scrublet_qc.py \
+            --matrix_dir {input.matrix_dir} \
+            --outdir {params.outdir} \
+            --nthreads {threads}
+        """
+
+###############################################################################
+# End of Snakefile
+###############################################################################

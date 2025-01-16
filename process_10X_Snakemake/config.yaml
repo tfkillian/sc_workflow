@@ -1,0 +1,9 @@
+samples:
+  - SAMPLE_1
+  - SAMPLE_2
+cellranger_ref: "/path/to/refdata-gex-GRCh38-2020-A"
+# Optional default resource settings:
+resources:
+  cellranger: 8
+  fastqc: 2
+  scrublet: 4
